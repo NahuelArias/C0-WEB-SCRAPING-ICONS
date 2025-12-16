@@ -3,17 +3,19 @@ import { promises as fs } from "fs";
 import path from "path";
 import { locate } from "@iconify/json";
 import { getIconData, iconToSVG } from "@iconify/utils";
+import { SIZE_PRESETS, validateSizes, getSizePreset } from "./sizeConfig.js";
+import { generateRectangularSVG, processSvgBodyForRectangular } from "./svgUtils.js";
 
 // ⚙️ Configuración por defecto
 const DEFAULT_CONFIG = Object.freeze({
     collections: [],
     iconsToExport: [],
-    // MODIFICACIÓN: Ruta de salida por defecto más clara
-    // Usamos './icons' como se definió originalmente, pero en un contexto de build,
-    // es común usar algo como './dist/icons' o './output'. Mantenemos './icons' por coherencia.
-    outputDir: "./icons", 
+    outputDir: "./icons",
     defaultSize: 48,
     defaultColor: "red",
+    // NUEVO: Configuración de tamaños
+    sizePreset: "SQUARE", // SQUARE, RECTANGULAR, MOBILE, SOCIAL_MEDIA
+    customSizes: null, // Array personalizado de tamaños
     fileNaming: {
         pattern: "{collection}-{icon}",
         extension: "svg",
@@ -24,7 +26,9 @@ const DEFAULT_CONFIG = Object.freeze({
         enabled: true,
         pattern: "{collection}",
         groupBySize: false,
-        groupByColor: false
+        groupByColor: false,
+        // NUEVO: Agrupar por tipo de tamaño
+        groupBySizeType: false
     }
 });
 
@@ -42,6 +46,44 @@ class IconExporter {
     constructor(config = {}) {
         this.config = this.mergeConfig(DEFAULT_CONFIG, config);
         this.validateConfig();
+        this.setupSizes();
+    }
+
+    /**
+     * Configura los tamaños basados en la configuración
+     */
+    setupSizes() {
+        if (this.config.customSizes) {
+            this.sizes = this.config.customSizes;
+            this.sizeType = validateSizes(this.sizes);
+        } else {
+            const preset = getSizePreset(this.config.sizePreset);
+            this.sizes = preset.sizes;
+            this.sizeType = this.getSizeType(this.sizes);
+        }
+    }
+
+    /**
+     * Determina si una configuración de tamaño es cuadrada o rectangular
+     */
+    getSizeType(sizes) {
+        if (!Array.isArray(sizes) || sizes.length === 0) {
+            return 'unknown';
+        }
+        
+        const firstSize = sizes[0];
+        
+        // Si es un número, es cuadrado
+        if (typeof firstSize === 'number') {
+            return 'square';
+        }
+        
+        // Si es un objeto con width y height, es rectangular
+        if (typeof firstSize === 'object' && firstSize.width && firstSize.height) {
+            return 'rectangular';
+        }
+        
+        return 'unknown';
     }
 
     /**
@@ -52,13 +94,17 @@ class IconExporter {
             throw new Error("La configuración debe incluir al menos una colección");
         }
 
-        // Aunque mergeConfig asegura que haya un valor, esta validación es buena.
         if (typeof this.config.outputDir !== 'string' || this.config.outputDir.trim() === '') {
             throw new Error("El directorio de salida debe ser una cadena no vacía");
         }
 
         if (!VALID_CASE_TYPES.has(this.config.fileNaming.case)) {
             throw new Error(`Tipo de caso no válido: ${this.config.fileNaming.case}`);
+        }
+
+        // Validar tamaños personalizados si se proporcionan
+        if (this.config.customSizes) {
+            validateSizes(this.config.customSizes);
         }
     }
 
@@ -150,14 +196,25 @@ class IconExporter {
      * Genera el nombre del archivo basado en el patrón configurado
      */
     generateFileName(collection, iconName, options = {}) {
-        const { size = this.config.defaultSize, color = this.config.defaultColor } = options;
+        const { 
+            size = this.config.defaultSize, 
+            color = this.config.defaultColor,
+            sizeType = this.sizeType 
+        } = options;
+        
         const cleanIconName = this.removeHyphensAndNumbersFromIconName(iconName);
 
         let fileName = this.config.fileNaming.pattern
             .replace('{collection}', collection)
             .replace('{icon}', cleanIconName)
-            .replace('{size}', size.toString())
             .replace('{color}', color || 'default');
+
+        // Manejar diferentes formatos de tamaño
+        if (sizeType === 'square') {
+            fileName = fileName.replace('{size}', size.toString());
+        } else if (sizeType === 'rectangular') {
+            fileName = fileName.replace('{size}', `${size.width}x${size.height}`);
+        }
 
         fileName = this.sanitizeString(fileName);
         fileName = this.applyCase(fileName, this.config.fileNaming.case);
@@ -173,17 +230,35 @@ class IconExporter {
             return this.config.outputDir;
         }
 
-        const { size = this.config.defaultSize, color = this.config.defaultColor } = options;
+        const { 
+            size = this.config.defaultSize, 
+            color = this.config.defaultColor,
+            sizeType = this.sizeType 
+        } = options;
 
         let folderPath = this.config.folderStructure.pattern
             .replace('{collection}', collection)
-            .replace('{size}', size.toString())
             .replace('{color}', color || 'default');
+
+        // Manejar diferentes formatos de tamaño en la ruta
+        if (sizeType === 'square') {
+            folderPath = folderPath.replace('{size}', size.toString());
+        } else if (sizeType === 'rectangular') {
+            folderPath = folderPath.replace('{size}', `${size.width}x${size.height}`);
+        }
 
         let fullPath = path.join(this.config.outputDir, folderPath);
 
         if (this.config.folderStructure.groupBySize) {
-            fullPath = path.join(fullPath, `size-${size}`);
+            if (sizeType === 'square') {
+                fullPath = path.join(fullPath, `size-${size}`);
+            } else if (sizeType === 'rectangular') {
+                fullPath = path.join(fullPath, `size-${size.width}x${size.height}`);
+            }
+        }
+
+        if (this.config.folderStructure.groupBySizeType) {
+            fullPath = path.join(fullPath, sizeType);
         }
 
         if (this.config.folderStructure.groupByColor && color) {
@@ -197,7 +272,6 @@ class IconExporter {
      * Crea el directorio de salida si no existe
      */
     async ensureOutputDir(dirPath = null) {
-        // MODIFICACIÓN: Usamos path.resolve() para obtener la ruta absoluta
         const targetDir = path.resolve(dirPath || this.config.outputDir);
 
         try {
@@ -259,20 +333,26 @@ class IconExporter {
     /**
      * Genera el contenido SVG completo
      */
-    generateSvgContent(renderData, processedBody, size = null) {
+    generateSvgContent(renderData, processedBody, size = null, sizeType = 'square') {
         const targetSize = size || this.config.defaultSize;
-        const { viewBox } = renderData.attributes;
 
-        return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}" width="${targetSize}" height="${targetSize}">
+        if (sizeType === 'square') {
+            const { viewBox } = renderData.attributes;
+            return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}" width="${targetSize}" height="${targetSize}">
     ${processedBody}
 </svg>`;
+        } else if (sizeType === 'rectangular') {
+            const { width, height } = targetSize;
+            const rectangularData = processSvgBodyForRectangular(renderData, width, height);
+            return generateRectangularSVG(rectangularData, processedBody, width, height);
+        }
     }
 
     /**
      * Procesa un solo icono con opciones personalizadas
      */
     async processIcon(data, iconName, collection, options = {}) {
-        const { size, color } = options;
+        const { size, color, sizeType = this.sizeType } = options;
 
         try {
             const iconData = getIconData(data, iconName);
@@ -283,16 +363,34 @@ class IconExporter {
 
             const targetSize = size || this.config.defaultSize;
 
-            const renderData = iconToSVG(iconData, {
-                height: `${targetSize}px`,
-                width: `${targetSize}px`
-            });
+            // Configurar dimensiones para iconToSVG
+            let renderOptions = {};
+            if (sizeType === 'square') {
+                renderOptions = {
+                    height: `${targetSize}px`,
+                    width: `${targetSize}px`
+                };
+            } else if (sizeType === 'rectangular') {
+                renderOptions = {
+                    height: `${targetSize.height}px`,
+                    width: `${targetSize.width}px`
+                };
+            }
 
+            const renderData = iconToSVG(iconData, renderOptions);
             const processedBody = this.applySvgColor(renderData.body, color);
-            const svgContent = this.generateSvgContent(renderData, processedBody, targetSize);
+            const svgContent = this.generateSvgContent(renderData, processedBody, targetSize, sizeType);
 
-            const folderPath = this.generateFolderPath(collection, { size: targetSize, color });
-            const fileName = this.generateFileName(collection, iconName, { size: targetSize, color });
+            const folderPath = this.generateFolderPath(collection, { 
+                size: targetSize, 
+                color,
+                sizeType 
+            });
+            const fileName = this.generateFileName(collection, iconName, { 
+                size: targetSize, 
+                color,
+                sizeType 
+            });
             const filePath = path.join(folderPath, fileName);
 
             await this.ensureOutputDir(folderPath);
@@ -319,6 +417,7 @@ class IconExporter {
 
             console.log(`📁 Estructura de carpetas: ${this.config.folderStructure.enabled ? 'Habilitada' : 'Deshabilitada'}`);
             console.log(`📝 Patrón de nombres: ${this.config.fileNaming.pattern}`);
+            console.log(`📏 Tipo de tamaños: ${this.sizeType}`);
 
             for (const iconName of icons) {
                 if (!this.validateIcon(data, iconName, collection)) {
@@ -345,7 +444,12 @@ class IconExporter {
      * Exporta iconos con múltiples variantes (tamaños, colores)
      */
     async exportWithVariants(variants = {}) {
-        const { sizes = [this.config.defaultSize], colors = [this.config.defaultColor] } = variants;
+        const { 
+            sizes = this.sizes, 
+            colors = [this.config.defaultColor],
+            sizeType = this.sizeType 
+        } = variants;
+        
         const startTime = Date.now();
 
         try {
@@ -356,12 +460,13 @@ class IconExporter {
 
             for (const collection of this.config.collections) {
                 console.log(`📦 Procesando colección: ${collection}`);
+                console.log(`📏 Tipo de tamaños: ${sizeType}`);
 
                 const data = await this.loadCollectionData(collection);
                 const icons = this.getIconsToProcess(data);
 
                 const collectionResults = await this.processCollectionWithVariants(
-                    data, collection, icons, sizes, colors
+                    data, collection, icons, sizes, colors, sizeType
                 );
                 
                 totalProcessed += collectionResults.processed;
@@ -382,7 +487,7 @@ class IconExporter {
     /**
      * Procesa una colección con todas las variantes
      */
-    async processCollectionWithVariants(data, collection, icons, sizes, colors) {
+    async processCollectionWithVariants(data, collection, icons, sizes, colors, sizeType) {
         let processed = 0;
         let errors = 0;
 
@@ -394,7 +499,11 @@ class IconExporter {
 
             for (const size of sizes) {
                 for (const color of colors) {
-                    const success = await this.processIcon(data, iconName, collection, { size, color });
+                    const success = await this.processIcon(data, iconName, collection, { 
+                        size, 
+                        color,
+                        sizeType 
+                    });
                     if (success) {
                         processed++;
                     } else {
@@ -451,9 +560,10 @@ export async function exportIconVariants(config = {}, variants = {}) {
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, '/'))) {
     const customConfig = {
         collections: ["nonicons", "devicon", "file-icons", "skill-icons", "vscode-icons", "material-icon-theme"],
-        outputDir: "D:/Usuarios/Nacho/OneDrive/Imágenes/icons/iconify",
+        outputDir: "./icons/iconify",
         defaultSize: 64,
         defaultColor: "",
+        sizePreset: "SQUARE",
         iconsToExport: [],
         fileNaming: {
             pattern: "{icon}-{size}",
@@ -463,7 +573,8 @@ if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, '
             enabled: true,
             pattern: "{collection}",
             groupBySize: true,
-            groupByColor: false
+            groupByColor: false,
+            groupBySizeType: true
         }
     };
 
