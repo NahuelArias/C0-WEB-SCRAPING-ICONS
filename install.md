@@ -1,0 +1,1 @@
+npm install @iconify/json @iconify/utils sharp

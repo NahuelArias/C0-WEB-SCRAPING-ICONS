@@ -10,7 +10,10 @@
     "dev": "node --watch IconExporter.js"
   },
   "dependencies": {
-    "@iconify/json": "^2.2.184"
+    "@iconify/core": "^4.1.0",
+    "@iconify/json": "^2.2.418",
+    "@iconify/utils": "^3.1.0",
+    "sharp": "^0.34.5"
   },
   "keywords": [
     "iconify",
